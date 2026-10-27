@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Stockfish شطرنج</title>
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon-192.png"><meta name="theme-color" content="#5d7a45">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{--bg:#f6f5f1;--fg:#1c1c1a;--card:#fff;--lt:#eeeed2;--dk:#769656;--sel:#f6f669;--hint:#4aa3ff;--mut:#6b6b66;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--fg:#eee;--card:#232321;--lt:#b9b9a0;--dk:#5d7a45;--mut:#a0a09a}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Vazirmatn",Tahoma,sans-serif;padding:12px;max-width:520px;margin:0 auto}
+h1{font-size:18px;margin:4px 0 10px}
+#board{direction:ltr;display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-template-rows:repeat(8,minmax(0,1fr));width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;user-select:none;-webkit-tap-highlight-color:transparent}
+.sq{position:relative;min-width:0;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:min(9vw,46px);line-height:1}
+.l{background:var(--lt)}.d{background:var(--dk)}
+.sq.sel{background:var(--sel)}.sq.last{box-shadow:inset 0 0 0 100px rgba(255,235,59,.35)}
+.sq.hint{box-shadow:inset 0 0 0 4px var(--hint),inset 0 0 0 100px rgba(74,163,255,.3)}
+.sq.dot::after{content:"";position:absolute;width:26%;height:26%;border-radius:50%;background:rgba(0,0,0,.25)}
+.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,0 0 1px #000}.b{color:#111;text-shadow:0 0 1px rgba(255,255,255,.5)}
+.co{position:absolute;font-size:9px;opacity:.7;color:#333}.co.f{bottom:1px;right:2px}.co.r{top:1px;left:2px}
+.card{background:var(--card);border-radius:12px;padding:12px;margin-top:10px}
+#sug{font-size:22px;font-weight:700;min-height:30px}#sub{color:var(--mut);font-size:13px;margin-top:4px}
+.row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+button{flex:1;min-width:30%;padding:11px 8px;border-radius:10px;border:1px solid var(--mut);background:var(--card);color:var(--fg);font:inherit;font-size:14px}
+button.p{background:var(--dk);color:#fff;border-color:var(--dk)}
+#turn{font-size:14px;color:var(--mut);margin-bottom:6px}
+</style>
+</head>
+<body>
+<h1>♟️ بهترین حرکت (Stockfish)</h1>
+<div id="turn"></div>
+<div id="board"></div>
+<div class="card">
+  <div id="sug">—</div><div id="sub"></div>
+  <div class="row"><button class="p" id="bBest">بهترین حرکت؟</button><button id="bUndo">↩ برگشت</button></div>
+  <div class="row"><button id="bMine">من: سفید</button><button id="bFlip">⇅ چرخش صفحه</button><button id="bNew">بازی جدید</button><button id="bTime">زمان فکر: ۱ ثانیه</button></div>
+</div>
+<script src="chess.js"></script>
+<script>
+const G={p:"♟\uFE0E",n:"♞\uFE0E",b:"♝\uFE0E",r:"♜\uFE0E",q:"♛\uFE0E",k:"♚\uFE0E"};
+const V={p:100,n:320,b:330,r:500,q:900,k:0};
+let g=new Chess(),sel=null,hint=null,flipped=false,mine='w',last=null,token=0;
+const $=id=>document.getElementById(id);
+
+// ---------- Stockfish 10 (real engine, asm.js in a Web Worker) ----------
+let sf=null,ready=false,busy=false,queued=false,searchFen='',cur=null,thinkMs=1000;
+function initSF(){
+ $('sug').textContent='در حال آماده‌سازی Stockfish…';
+ try{sf=new Worker('engine.js');sf.onmessage=onSF;sf.postMessage('uci')}
+ catch(e){$('sug').textContent='موتور اجرا نشد. صفحه را از روی هاست باز کن، نه مستقیم از فایل.'}}
+function onSF(e){
+ const l=typeof e.data==='string'?e.data:String(e.data);
+ if(l==='uciok')sf.postMessage('isready');
+ else if(l==='readyok'){if(!ready){ready=true;$('sug').textContent='—';if(g.turn()===mine)suggest()}}
+ else if(l.startsWith('info')&&l.includes(' score ')){
+  const m=l.match(/depth (\d+).*? score (cp|mate) (-?\d+)/);if(m)cur={depth:+m[1],type:m[2],val:+m[3]}}
+ else if(l.startsWith('bestmove'))finish(l.split(' ')[1])}
+function start(){
+ busy=true;cur=null;searchFen=g.fen();
+ sf.postMessage('position fen '+searchFen);sf.postMessage('go movetime '+thinkMs)}
+function finish(u){
+ busy=false;
+ if(queued){queued=false;if(!over())start();return}
+ if(searchFen!==g.fen()||!u||u==='(none)')return;
+ const m=g.moves({verbose:true}).find(x=>x.from===u.slice(0,2)&&x.to===u.slice(2,4)&&(!x.promotion||x.promotion===(u[4]||'q')));
+ if(!m)return;
+ hint={from:m.from,to:m.to};
+ let info='';
+ if(cur){const w=g.turn()==='w'?1:-1;
+  info=cur.type==='mate'?('مات در '+Math.abs(cur.val)+' حرکت برای '+(cur.val>0?'شما (نوبت‌دار)':'حریف'))
+   :'ارزیابی: '+(w*cur.val>0?'+':'')+(w*cur.val/100).toFixed(2)+' (مثبت = به نفع سفید)';
+  info='عمق '+cur.depth+' · '+info}
+ $('sug').textContent=m.san+'  ('+m.from+' ← '+m.to+')';$('sub').textContent=info;render()}
+function suggest(){
+ if(over()||!ready)return;
+ $('sug').textContent='Stockfish در حال فکر…';$('sub').textContent='';
+ if(busy){queued=true;sf.postMessage('stop');return}
+ start()}
+// ---------- UI ----------
+function over(){return g.game_over()}
+function status(){
+ if(g.in_checkmate())return 'کیش و مات! '+(g.turn()==='w'?'سیاه':'سفید')+' برنده شد.';
+ if(g.in_draw())return 'بازی مساوی شد.';
+ return 'نوبت: '+(g.turn()==='w'?'سفید':'سیاه')+(g.in_check()?' (کیش)':'')+(g.turn()===mine?' — نوبت شما':' — نوبت حریف')}
+function render(){
+ const el=$('board');el.innerHTML='';
+ const legal=sel?g.moves({square:sel,verbose:true}).map(m=>m.to):[];
+ for(let i=0;i<8;i++)for(let j=0;j<8;j++){
+  const rank=flipped?i+1:8-i,file=flipped?7-j:j,name='abcdefgh'[file]+rank;
+  const d=document.createElement('div');
+  d.className='sq '+((file+rank)%2===0?'l':'d');
+  if(last&&(name===last.from||name===last.to))d.classList.add('last');
+  if(hint&&(name===hint.from||name===hint.to))d.classList.add('hint');
+  if(name===sel)d.classList.add('sel');
+  if(legal.includes(name))d.classList.add('dot');
+  const p=g.get(name);
+  if(p){const s=document.createElement('span');s.className=p.color;s.textContent=G[p.type];d.appendChild(s)}
+  if(j===7){const r=document.createElement('i');r.className='co r';r.textContent=rank;r.style.fontStyle='normal';d.appendChild(r)}
+  if(i===7){const f=document.createElement('i');f.className='co f';f.textContent='abcdefgh'[file];f.style.fontStyle='normal';d.appendChild(f)}
+  d.onclick=()=>tap(name);el.appendChild(d)}
+ $('turn').textContent=status();
+ $('bMine').textContent='من: '+(mine==='w'?'سفید':'سیاه')}
+function tap(name){
+ if(over())return;
+ if(sel){
+  const m=g.moves({square:sel,verbose:true}).find(x=>x.to===name);
+  if(m){g.move({from:sel,to:name,promotion:'q'});last={from:sel,to:name};sel=null;hint=null;
+   $('sug').textContent='—';$('sub').textContent='';render();
+   if(!over()&&g.turn()===mine)suggest();return}}
+ const p=g.get(name);sel=(p&&p.color===g.turn())?name:null;render()}
+$('bBest').onclick=suggest;
+$('bUndo').onclick=()=>{token++;g.undo();const h=g.history({verbose:true});last=h.length?h[h.length-1]:null;sel=null;hint=null;$('sug').textContent='—';$('sub').textContent='';render()};
+$('bNew').onclick=()=>{token++;if(ready)sf.postMessage('ucinewgame');g=new Chess();sel=hint=last=null;$('sug').textContent='—';$('sub').textContent='';render();if(g.turn()===mine)suggest()};
+$('bFlip').onclick=()=>{flipped=!flipped;render()};
+$('bMine').onclick=()=>{mine=mine==='w'?'b':'w';flipped=mine==='b';hint=null;token++;$('sug').textContent='—';render();if(g.turn()===mine)suggest()};
+const TT=[500,1000,2000,5000];
+$('bTime').onclick=()=>{thinkMs=TT[(TT.indexOf(thinkMs)+1)%TT.length];$('bTime').textContent='زمان فکر: '+(thinkMs/1000).toLocaleString('fa')+' ثانیه'};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+render();initSF();
+</script>
+</body>
+</html>
